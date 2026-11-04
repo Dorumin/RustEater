@@ -2,10 +2,10 @@
 #![deny(clippy::nursery)]
 #![deny(clippy::pedantic)]
 
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-use serde::{Serialize, Deserialize};
 use structopt::StructOpt;
-use async_std::task;
+use tokio::time;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "eater", about = "Eats Discord DMs, whole.")]
@@ -23,7 +23,7 @@ struct Options {
     target: Option<String>,
 
     #[structopt(long, use_delimiter = true)]
-    exclude: Option<Vec<String>>
+    exclude: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,7 +34,8 @@ struct UserInfo {
 
 async fn fetch_info(options: &Options) -> Result<UserInfo, reqwest::Error> {
     let client = reqwest::Client::new();
-    let res = client.get("https://discord.com/api/v6/users/@me")
+    let res = client
+        .get("https://discord.com/api/v6/users/@me")
         .header("Authorization", &options.token)
         .send()
         .await?
@@ -49,23 +50,23 @@ struct Message {
     r#type: i32,
     id: String,
     author: Author,
-    attachments: Vec<Attachment>
+    attachments: Vec<Attachment>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Author {
-    id: String
+    id: String,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Attachment {
-    id: String
+    id: String,
 }
 
 #[derive(Serialize, Deserialize)]
 struct RatelimitError {
     message: String,
-    retry_after: u64
+    retry_after: u64,
 }
 
 async fn fetch_messages(options: &Options) -> Result<Vec<Message>, reqwest::Error> {
@@ -74,22 +75,25 @@ async fn fetch_messages(options: &Options) -> Result<Vec<Message>, reqwest::Erro
     let mut messages = vec![];
 
     loop {
-        let url = format!("https://discord.com/api/v6/channels/{}/messages?after={}&limit=100", &options.id, last_id);
-        let res = client.get(&url)
+        let url = format!(
+            "https://discord.com/api/v6/channels/{}/messages?after={}&limit=100",
+            options.id, last_id
+        );
+        let res = client
+            .get(&url)
             .header("Authorization", &options.token)
             .send()
             .await?;
 
         if res.status().as_u16() == 429 {
-            task::sleep(Duration::from_millis(5000)).await;
+            time::sleep(Duration::from_secs(5)).await;
             continue;
         }
 
-        let mut res = res.json::<Vec<Message>>()
-            .await?;
+        let mut res = res.json::<Vec<Message>>().await?;
 
         if res.is_empty() {
-            break
+            break;
         }
 
         println!("Fetched {} messages", messages.len() + res.len());
@@ -110,23 +114,28 @@ async fn delete_messages(options: &Options, messages: &[Message]) -> Result<(), 
     for message in messages {
         loop {
             let start = Instant::now();
-            let url = format!("https://discord.com/api/v6/channels/{}/messages/{}", options.id, message.id);
-            let result = client.delete(&url)
+            let url = format!(
+                "https://discord.com/api/v6/channels/{}/messages/{}",
+                options.id, message.id
+            );
+            let result = client
+                .delete(&url)
                 .header("Authorization", &options.token)
                 .send()
                 .await;
 
             match result {
-                Err(_) => continue,
+                Err(_) => {}
                 Ok(res) => {
                     let text = res.text().await?;
 
                     if text.is_empty() {
-                        println!("Deleted {id} in {ms}ms",
+                        println!(
+                            "Deleted {id} in {ms}ms",
                             id = message.id,
                             ms = start.elapsed().as_millis()
                         );
-                        task::sleep(Duration::from_millis(1200)).await;
+                        time::sleep(Duration::from_millis(4200)).await;
                         break;
                     }
 
@@ -134,14 +143,12 @@ async fn delete_messages(options: &Options, messages: &[Message]) -> Result<(), 
 
                     if let Ok(error) = maybe_error {
                         let delay = error.retry_after;
-                        println!("Hit a ratelimit! Waiting {}ms...", delay);
+                        println!("Hit a ratelimit! Waiting {delay}ms...");
 
-                        task::sleep(Duration::from_millis(delay + 1000)).await;
+                        time::sleep(Duration::from_millis(delay + 1000)).await;
                     } else {
-                        eprintln!("Uncaught error in network response! {}", &text);
+                        eprintln!("Uncaught error in network response! {text}");
                     }
-
-                    continue;
                 }
             }
         }
@@ -150,7 +157,7 @@ async fn delete_messages(options: &Options, messages: &[Message]) -> Result<(), 
     Ok(())
 }
 
-#[async_std::main]
+#[tokio::main]
 async fn main() -> Result<(), reqwest::Error> {
     let mut options = Options::from_args();
 
@@ -166,7 +173,8 @@ async fn main() -> Result<(), reqwest::Error> {
     let messages = fetch_messages(&options).await?;
     println!("Found {} messages", messages.len());
 
-    let mut messages: Vec<Message> = messages.into_iter()
+    let mut messages: Vec<Message> = messages
+        .into_iter()
         .filter(|message| message.author.id == *options.target.as_ref().unwrap())
         .filter(|message| [0, 4, 6].contains(&message.r#type))
         // .filter(|message| !message.attachments.is_empty())
@@ -175,16 +183,15 @@ async fn main() -> Result<(), reqwest::Error> {
     if let Some(ref exclusions) = options.exclude {
         dbg!(exclusions);
 
-        messages = messages.into_iter()
-            .filter(|message| !exclusions.contains(&message.id))
-            .collect();
+        messages.retain(|message| !exclusions.contains(&message.id));
     }
 
     println!("Found {} own messages", messages.len());
 
     delete_messages(&options, &messages).await?;
 
-    println!("Done! It took {}ms to delete {} messages",
+    println!(
+        "Done! It took {}ms to delete {} messages",
         start.elapsed().as_millis(),
         messages.len()
     );
